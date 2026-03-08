@@ -4,20 +4,13 @@
 לוח זמנים:
   05:30 - 23:30  →  בדיקה כל 15 דקות
   23:30 - 05:30  →  בדיקה ב-23:30 בלבד, ואז שוב ב-05:30
-
-התקנה:
-    pip install requests schedule
 """
 
 import json
 import os
 import time
-import schedule
-import smtplib
 import requests
-from datetime import datetime
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from datetime import datetime, time as dtime
 
 # ══════════════════════════════════════════════════════
 #  ✏️  הגדרות — ערוך רק כאן
@@ -30,25 +23,21 @@ MAX_ROOMS = 3
 
 SEEN_IDS_FILE = "seen_listings.json"
 
-# Telegram: שלח הודעה ל-@BotFather ← /newbot ← קבל TOKEN
-# אחר כך: https://api.telegram.org/bot<TOKEN>/getUpdates  ← קבל chat_id
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-TELEGRAM_CHAT_ID   = "YOUR_CHAT_ID_HERE"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "YOUR_CHAT_ID_HERE")
 
 # ══════════════════════════════════════════════════════
 #  🗺️  אזורי חיפוש — קודים מאומתים מ-API של יד2
 # ══════════════════════════════════════════════════════
 
 SEARCH_AREAS = [
-    # ── ערים מלאות ──────────────────────────────────
     {"label": "נס ציונה",  "city": "7200", "area": "12", "topArea": "41"},
     {"label": "באר יעקב",  "city": "2530", "area": "9",  "topArea": "2"},
     {"label": "נטעים",     "city": "0174", "area": "9",  "topArea": "2"},
     {"label": "בית חנן",   "city": "0159", "area": "9",  "topArea": "2"},
     {"label": "אירוס",     "city": "1336", "area": "9",  "topArea": "2"},
+    {"label": "בית דגן",   "city": "0466", "area": "9",  "topArea": "2"},
     {"label": "גן שורק",   "city": "0311", "area": "9",  "topArea": "2"},
-
-    # ── שכונות ראשון לציון ───────────────────────────
     {"label": "שיכוני המזרח, ראשון לציון", "city": "8300", "hood": "283",    "area": "9", "topArea": "2"},
     {"label": "נרקיסים, ראשון לציון",       "city": "8300", "hood": "991420", "area": "9", "topArea": "2"},
     {"label": "צמרות, ראשון לציון",          "city": "8300", "hood": "299",    "area": "9", "topArea": "2"},
@@ -56,35 +45,48 @@ SEARCH_AREAS = [
     {"label": "מישור הנוף, ראשון לציון",    "city": "8300", "hood": "303",    "area": "9", "topArea": "2"},
     {"label": "הרקפות, ראשון לציון",         "city": "8300", "hood": "991415", "area": "9", "topArea": "2"},
     {"label": "חצבים, ראשון לציון",          "city": "8300", "hood": "991419", "area": "9", "topArea": "2"},
-
-    # ── שכונה ברחובות ────────────────────────────────
-    {"label": "נווה עמית, רחובות", "city": "8400", "hood": "1211", "area": "12", "topArea": "41"},
+    {"label": "נווה עמית, רחובות",           "city": "8400", "hood": "1211",   "area": "12", "topArea": "41"},
 ]
 
 # ══════════════════════════════════════════════════════
-#  לוגיקה — אין צורך לערוך מכאן
+#  לוגיקה פנימית
 # ══════════════════════════════════════════════════════
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8",
-    "Referer": "https://www.yad2.co.il/",
-}
+# Session עם headers שמחקים דפדפן ישראלי אמיתי
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Origin": "https://www.yad2.co.il",
+    "Referer": "https://www.yad2.co.il/realestate/rent",
+    "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+})
 
 
 def now_str():
     return datetime.now().strftime("%H:%M:%S")
 
 
-def is_active_hours() -> bool:
-    """מחזיר True בין 05:30 ל-23:30"""
-    t = datetime.now().time()
-    from datetime import time as dtime
-    return dtime(5, 30) <= t < dtime(23, 30)
+def is_time_to_check() -> bool:
+    """מחזיר True אם הגיע הזמן לבדוק לפי לוח הזמנים"""
+    t = datetime.now()
+    minute_of_day = t.hour * 60 + t.minute
+    MORNING = 5 * 60 + 30   # 05:30
+    NIGHT   = 23 * 60 + 30  # 23:30
+
+    if MORNING <= minute_of_day < NIGHT:
+        # שעות פעילות — כל 15 דקות בדיוק
+        return t.minute % 15 == 0
+    else:
+        # לילה — רק ב-23:30 או ב-05:30
+        return (t.hour == 23 and t.minute == 30) or (t.hour == 5 and t.minute == 30)
 
 
 def load_seen_ids():
@@ -106,17 +108,16 @@ def fetch_listings_for_area(area: dict) -> list:
         "forceLdLoad": "true",
         "city":        area["city"],
     }
-    if area.get("hood"):
-        params["neighborhood"] = area["hood"]
-    if area.get("area"):
-        params["area"] = area["area"]
-    if area.get("topArea"):
-        params["topArea"] = area["topArea"]
+    if area.get("hood"):    params["neighborhood"] = area["hood"]
+    if area.get("area"):    params["area"]         = area["area"]
+    if area.get("topArea"): params["topArea"]      = area["topArea"]
 
     try:
-        resp = requests.get(
+        # קודם נבקר בדף הבית כדי לקבל cookies
+        resp = session.get(
             "https://gw.yad2.co.il/feed-search-legacy/realestate/rent",
-            params=params, headers=HEADERS, timeout=15
+            params=params,
+            timeout=20
         )
         resp.raise_for_status()
         items = resp.json().get("data", {}).get("feed", {}).get("feed_items", [])
@@ -133,6 +134,9 @@ def fetch_listings_for_area(area: dict) -> list:
             }
             for i in items if i.get("type") == "ad"
         ]
+    except requests.exceptions.HTTPError as e:
+        print(f"[{now_str()}] HTTP {e.response.status_code} ב-{area['label']}")
+        return []
     except Exception as e:
         print(f"[{now_str()}] שגיאה ב-{area['label']}: {e}")
         return []
@@ -146,23 +150,20 @@ def send_telegram(message: str):
             timeout=10
         )
         resp.raise_for_status()
+        print(f"[{now_str()}] ✓ Telegram נשלח")
     except Exception as e:
         print(f"[{now_str()}] שגיאת Telegram: {e}")
 
 
-def notify(listing: dict):
-    send_telegram(
-        f"🏠 <b>דירה חדשה! {listing['area_label']}</b>\n\n"
-        f"📍 {listing['city']} - {listing['street']}\n"
-        f"🛏 חדרים: {listing['rooms']}\n"
-        f"💰 מחיר: {listing['price']} ₪\n"
-        f"📐 שטח: {listing['size']} מ\"ר\n"
-        f"🔗 <a href=\"{listing['link']}\">לצפייה במודעה</a>"
-    )
-
-
 def check_all_areas():
     print(f"\n[{now_str()}] 🔍 בודק {len(SEARCH_AREAS)} אזורים...")
+
+    # אתחול session עם ביקור בדף הראשי (לקבלת cookies)
+    try:
+        session.get("https://www.yad2.co.il/realestate/rent", timeout=15)
+    except Exception:
+        pass
+
     seen_ids  = load_seen_ids()
     total_new = 0
 
@@ -172,40 +173,25 @@ def check_all_areas():
         for listing in listings:
             if listing["id"] and listing["id"] not in seen_ids:
                 print(f"[{now_str()}] 🆕 {area['label']} | {listing['street']} | {listing['rooms']} חד׳ | {listing['price']}₪")
-                notify(listing)
+                send_telegram(
+                    f"🏠 <b>דירה חדשה! {listing['area_label']}</b>\n\n"
+                    f"📍 {listing['city']} - {listing['street']}\n"
+                    f"🛏 חדרים: {listing['rooms']}\n"
+                    f"💰 מחיר: {listing['price']} ₪\n"
+                    f"📐 שטח: {listing['size']} מ\"ר\n"
+                    f"🔗 <a href=\"{listing['link']}\">לצפייה במודעה</a>"
+                )
                 seen_ids.add(listing["id"])
                 new_in_area += 1
                 total_new   += 1
                 time.sleep(1)
-        if listings and new_in_area == 0:
-            print(f"[{now_str()}] ✓  {area['label']}: {len(listings)} נבדקו")
+
+        status = f"{len(listings)} נבדקו" if listings else "0 תוצאות"
+        print(f"[{now_str()}] {'🆕 ' + str(new_in_area) + ' חדש' if new_in_area else '✓  ' + status} — {area['label']}")
         time.sleep(2)
 
     save_seen_ids(seen_ids)
-    print(f"[{now_str()}] {'🎉 ' + str(total_new) + ' מודעות חדשות!' if total_new else 'אין חדש.'}")
-
-
-def smart_check():
-    """
-    מופעל כל דקה על ידי הלולאה הראשית.
-    מחליט האם לבצע בדיקה עכשיו לפי לוח הזמנים:
-      05:30 - 23:30  → כל 15 דקות
-      23:30          → בדיקה אחת, ואז שוב ב-05:30
-    """
-    t = datetime.now()
-    minute = t.hour * 60 + t.minute   # דקה מתחילת היום
-
-    MORNING  = 5  * 60 + 30   # 05:30 = 330
-    NIGHT    = 23 * 60 + 30   # 23:30 = 1410
-
-    if MORNING <= minute < NIGHT:
-        # שעות פעילות — בדוק כל 15 דקות בדיוק
-        if t.minute % 15 == 0:
-            check_all_areas()
-    else:
-        # שעות לילה — רק ב-23:30 או ב-05:30
-        if (t.hour == 23 and t.minute == 30) or (t.hour == 5 and t.minute == 30):
-            check_all_areas()
+    print(f"[{now_str()}] סיום. {'🎉 ' + str(total_new) + ' מודעות חדשות!' if total_new else 'אין חדש.'}")
 
 
 # ══════════════════════════════════════════════════════
@@ -215,18 +201,17 @@ def smart_check():
 if __name__ == "__main__":
     print("╔══════════════════════════════════════════════════╗")
     print("║       יד2 מוניטור דירות — פועל!                ║")
-    print("║  05:30–23:30  →  בדיקה כל 15 דקות              ║")
-    print("║  23:30–05:30  →  בדיקה ב-23:30 ושוב ב-05:30    ║")
-    print(f"║  {MIN_ROOMS}-{MAX_ROOMS} חדרים | עד {MAX_PRICE}₪ | {len(SEARCH_AREAS)} אזורים           ║")
-    print("╚══════════════════════════════════════════════════╝")
-    print()
+    print("║  05:30–23:30  →  כל 15 דקות                    ║")
+    print("║  23:30–05:30  →  רק ב-23:30 ושוב ב-05:30       ║")
+    print(f"║  {MIN_ROOMS}-{MAX_ROOMS} חדרים | עד {MAX_PRICE}₪ | {len(SEARCH_AREAS)} אזורים              ║")
+    print("╚══════════════════════════════════════════════════╝\n")
 
-    # בדיקה ראשונה מיד בהפעלה
+    # בדיקה ראשונה מיד
     check_all_areas()
 
-    # לולאה ראשית — בודקת כל דקה אם הגיע הזמן
+    # לולאה ראשית — מחכה עד תחילת הדקה הבאה ובודקת
     while True:
-        smart_check()
-        # ממתין עד תחילת הדקה הבאה
         seconds_to_next_minute = 60 - datetime.now().second
         time.sleep(seconds_to_next_minute)
+        if is_time_to_check():
+            check_all_areas()
