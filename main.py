@@ -11,8 +11,8 @@ import requests
 from datetime import datetime
 
 SEEN_IDS_FILE = "seen_listings.json"
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8761062316:AAElpHkOBhp3qJ-F9SKIBN6WueNgNVmLrWk")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "336895483")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "")
 
 BASE_PARAMS = "maxPrice=5500&minRooms=2&maxRooms=3&minSquaremeter=50&property=1"
 BASE = "https://www.yad2.co.il/realestate/rent/center-and-sharon"
