@@ -46,7 +46,6 @@ SEARCH_AREAS = [
     {"label": "נטעים",     "city": "0174", "area": "9",  "topArea": "2"},
     {"label": "בית חנן",   "city": "0159", "area": "9",  "topArea": "2"},
     {"label": "אירוס",     "city": "1336", "area": "9",  "topArea": "2"},
-    {"label": "בית דגן",   "city": "0466", "area": "9",  "topArea": "2"},
     {"label": "גן שורק",   "city": "0311", "area": "9",  "topArea": "2"},
 
     # ── שכונות ראשון לציון ───────────────────────────
