@@ -59,6 +59,7 @@ YAD2_AREAS = [
     {"label": "נוריות, ראשון לציון",       "url": f"{_Y}?{_YP}&area=9&city=8300&neighborhood=991421"},
     {"label": "צמרות, ראשון לציון",        "url": f"{_Y}?{_YP}&area=9&city=8300&neighborhood=299"},
     {"label": "נווה עמית, רחובות",         "url": f"{_Y}?{_YP}&area=12&city=8400&neighborhood=1211"},
+    {"label": "בית עובד",                  "url": f"{_Y}?{_YP}&area=9&city=0202"},
 ]
 
 # ══════════════════════════════════════════════════════
@@ -84,6 +85,7 @@ KOMO_AREAS = [
     {"label": "נרקיסים, ראשון לציון",      "url": f"{_K}?cityName=%D7%A8%D7%90%D7%A9%D7%95%D7%9F+%D7%9C%D7%A6%D7%99%D7%95%D7%9F&neighborhoodNum=4555&{_KP}"},
     {"label": "נוריות, ראשון לציון",       "url": f"{_K}?cityName=%D7%A8%D7%90%D7%A9%D7%95%D7%9F+%D7%9C%D7%A6%D7%99%D7%95%D7%9F&neighborhoodNum=5189&{_KP}"},
     {"label": "נווה עמית, רחובות",         "url": f"{_K}?cityName=%D7%A8%D7%97%D7%95%D7%91%D7%95%D7%AA&neighborhoodNum=541&{_KP}"},
+    {"label": "בית עובד",                  "url": f"{_K}?cityName=%D7%91%D7%99%D7%AA+%D7%A2%D7%95%D7%91%D7%93&{_KP}"},
 ]
 
 # ══════════════════════════════════════════════════════
@@ -120,7 +122,7 @@ def send_telegram(message: str):
     except Exception as e:
         print(f"[{now_str()}] Telegram error: {e}")
 
-def fetch_html(url: str, homepage: str = None):
+def fetch_html(url: str, homepage: str = None, encoding: str = None):
     try:
         session = requests.Session()
         if homepage:
@@ -128,6 +130,8 @@ def fetch_html(url: str, homepage: str = None):
             time.sleep(1)
         resp = session.get(url, headers=HEADERS, timeout=20)
         if resp.status_code == 200:
+            if encoding:
+                resp.encoding = encoding
             return resp.text
         print(f"[{now_str()}] HTTP {resp.status_code} — {url[:70]}")
         return None
@@ -266,99 +270,67 @@ HOMELESS_AREAS = [
     {"label": "גן שורק",   "url": "https://www.homeless.co.il/rent/city=%d7%92%d7%9f%20%d7%a9%d7%95%d7%a8%d7%a7$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
     {"label": "עיינות",    "url": "https://www.homeless.co.il/rent/city=%d7%a2%d7%99%d7%99%d7%a0%d7%95%d7%aa$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
     {"label": "יד רמב\"ם", "url": "https://www.homeless.co.il/rent/city=%d7%99%d7%93%20%d7%a8%d7%9e%d7%91quot%d7%9d$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
+    {"label": "בית עובד", "url": "https://www.homeless.co.il/rent/city=%d7%91%d7%99%d7%aa%20%d7%a2%d7%95%d7%91%d7%93$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
 ]
 
 def parse_homeless(html: str, label: str) -> list:
     """
     הומלס — HTML ישן עם טבלת mainresults.
     כל שורה: id="ad_713282"
-    עמודות: [סוג, עיר, שכונה, רחוב, חדרים, קומה, מחיר, כניסה, תאריך]
+    עמודות: [ריק, ריק, סוג, עיר, שכונה, רחוב, חדרים, קומה, מחיר, כניסה, תאריך, ריק]
     לינק: /rent/viewad,713282.aspx
     """
-    from html.parser import HTMLParser
+    listings = []
+    # פצל לפי שורות tr עם id של מודעה
+    row_blocks = re.split(r'<tr[^>]+id="ad_(\d+)"[^>]*>', html)
+    # row_blocks[0] = תוכן לפני השורה הראשונה
+    # אחריו: ad_id, content, ad_id, content, ...
+    i = 1
+    while i < len(row_blocks) - 1:
+        ad_id   = row_blocks[i]
+        content = row_blocks[i + 1].split('</tr>')[0]
+        i += 2
 
-    class HomelessParser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.in_table   = False
-            self.in_row     = False
-            self.current_id = None
-            self.current_tds = []
-            self.current_td_text = []
-            self.in_td      = 0
-            self.current_link = ""
-            self.results    = []
+        # חלץ כל td (כולל nested tags)
+        tds = re.findall(r'<td[^>]*>(.*?)</td>', content, re.DOTALL)
+        tds_clean = [re.sub(r'<[^>]+>', '', td).strip() for td in tds]
 
-        def handle_starttag(self, tag, attrs):
-            attrs = dict(attrs)
-            if tag == "table" and attrs.get("id") == "mainresults":
-                self.in_table = True
-            if not self.in_table:
-                return
-            if tag == "tr":
-                row_id = attrs.get("id", "")
-                if row_id.startswith("ad_"):
-                    self.in_row     = True
-                    self.current_id = row_id[3:]  # הסר "ad_"
-                    self.current_tds = []
-                    self.current_link = ""
-            if self.in_row:
-                if tag == "td":
-                    self.in_td += 1
-                    self.current_td_text = []
-                if tag == "a" and "href" in attrs:
-                    href = attrs["href"]
-                    if "viewad" in href:
-                        self.current_link = href if href.startswith("http") else f"https://www.homeless.co.il{href}"
+        if len(tds_clean) < 9:
+            continue
 
-        def handle_endtag(self, tag):
-            if not self.in_table:
-                return
-            if tag == "td" and self.in_row and self.in_td > 0:
-                self.current_tds.append(" ".join(self.current_td_text).strip())
-                self.in_td -= 1
-            if tag == "tr" and self.in_row:
-                self.in_row = False
-                tds = self.current_tds
-                # עמודות: 0=ריק, 1=ריק, 2=סוג, 3=עיר, 4=שכונה, 5=רחוב, 6=חדרים, 7=קומה, 8=מחיר
-                if len(tds) >= 9 and self.current_id:
-                    price_raw = tds[8].replace("₪", "").replace(",", "").strip()
-                    try:
-                        price = int(price_raw)
-                    except ValueError:
-                        price = 0
-                    self.results.append({
-                        "id":     f"homeless_{self.current_id}",
-                        "source": "הומלס",
-                        "label":  label,
-                        "price":  price,
-                        "rooms":  tds[6],
-                        "size":   "",
-                        "city":   tds[3],
-                        "street": tds[5],
-                        "hood":   tds[4],
-                        "floor":  tds[7],
-                        "link":   self.current_link,
-                    })
-                self.current_id = None
+        # מחיר — נקה כל סימן שקל ופסיקות
+        price_raw = (tds_clean[8]
+                     .replace('&#8362;', '').replace('₪', '').replace('\u20aa', '')
+                     .replace(',', '').strip())
+        try:
+            price = int(price_raw)
+        except ValueError:
+            price = 0
 
-        def handle_data(self, data):
-            if self.in_row and self.in_td > 0:
-                text = data.strip()
-                if text:
-                    self.current_td_text.append(text)
+        # לינק
+        link_m = re.search(r'href="(/rent/viewad[^"]+)"', content)
+        link   = f"https://www.homeless.co.il{link_m.group(1)}" if link_m else ""
 
-    parser = HomelessParser()
-    try:
-        parser.feed(html)
-    except Exception as e:
-        print(f"[{now_str()}] homeless parse error {label}: {e}")
-    return parser.results
+        listings.append({
+            "id":     f"homeless_{ad_id}",
+            "source": "הומלס",
+            "label":  label,
+            "price":  price,
+            "rooms":  tds_clean[6] if len(tds_clean) > 6 else "",
+            "size":   "",
+            "city":   tds_clean[3] if len(tds_clean) > 3 else "",
+            "street": tds_clean[5] if len(tds_clean) > 5 else "",
+            "hood":   tds_clean[4] if len(tds_clean) > 4 else "",
+            "floor":  tds_clean[7] if len(tds_clean) > 7 else "",
+            "link":   link,
+        })
+
+    return listings
 
 def scrape_homeless() -> list:
     results = []
     for area in HOMELESS_AREAS:
-        html = fetch_html(area["url"])
+        html = fetch_html(area["url"], encoding="windows-1255")
         if html:
             listings = parse_homeless(html, area["label"])
             print(f"[{now_str()}] הומלס| {len(listings):2d} — {area['label']}")
