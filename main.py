@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-מוניטור דירות — יד2 + קומו (+ הומלס בקרוב)
+מוניטור דירות — יד2 + קומו
 בוט טלגרם אחד שבודק את כל האתרים.
 
 לוח זמנים:
@@ -257,86 +257,7 @@ def scrape_komo() -> list:
         time.sleep(2)
     return results
 
-# ══════════════════════════════════════════════════════
-#  הומלס — סקרפר
-# ══════════════════════════════════════════════════════
 
-HOMELESS_AREAS = [
-    {"label": "נס ציונה",  "url": "https://www.homeless.co.il/rent/city=%d7%a0%d7%a1%20%d7%a6%d7%99%d7%95%d7%a0%d7%94$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "באר יעקב", "url": "https://www.homeless.co.il/rent/city=%d7%91%d7%90%d7%a8%20%d7%99%d7%a2%d7%a7%d7%91$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "נצר סירני", "url": "https://www.homeless.co.il/rent/city=%d7%a0%d7%a6%d7%a8%20%d7%a1%d7%99%d7%a8%d7%a0%d7%99$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "בית חנן",   "url": "https://www.homeless.co.il/rent/city=%d7%91%d7%99%d7%aa%20%d7%97%d7%a0%d7%9f$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "נטעים",     "url": "https://www.homeless.co.il/rent/city=%d7%a0%d7%98%d7%a2%d7%99%d7%9d$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "גן שורק",   "url": "https://www.homeless.co.il/rent/city=%d7%92%d7%9f%20%d7%a9%d7%95%d7%a8%d7%a7$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "עיינות",    "url": "https://www.homeless.co.il/rent/city=%d7%a2%d7%99%d7%99%d7%a0%d7%95%d7%aa$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "יד רמב\"ם", "url": "https://www.homeless.co.il/rent/city=%d7%99%d7%93%20%d7%a8%d7%9e%d7%91quot%d7%9d$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-    {"label": "בית עובד", "url": "https://www.homeless.co.il/rent/city=%d7%91%d7%99%d7%aa%20%d7%a2%d7%95%d7%91%d7%93$$inumber4=3$$inumber4_1=5$$flong3_1=5500"},
-]
-
-def parse_homeless(html: str, label: str) -> list:
-    """
-    הומלס — HTML ישן עם טבלת mainresults.
-    כל שורה: id="ad_713282"
-    עמודות: [ריק, ריק, סוג, עיר, שכונה, רחוב, חדרים, קומה, מחיר, כניסה, תאריך, ריק]
-    לינק: /rent/viewad,713282.aspx
-    """
-    listings = []
-    # פצל לפי שורות tr עם id של מודעה
-    row_blocks = re.split(r'<tr[^>]+id="ad_(\d+)"[^>]*>', html)
-    # row_blocks[0] = תוכן לפני השורה הראשונה
-    # אחריו: ad_id, content, ad_id, content, ...
-    i = 1
-    while i < len(row_blocks) - 1:
-        ad_id   = row_blocks[i]
-        content = row_blocks[i + 1].split('</tr>')[0]
-        i += 2
-
-        # חלץ כל td (כולל nested tags)
-        tds = re.findall(r'<td[^>]*>(.*?)</td>', content, re.DOTALL)
-        tds_clean = [re.sub(r'<[^>]+>', '', td).strip() for td in tds]
-
-        if len(tds_clean) < 9:
-            continue
-
-        # מחיר — נקה כל סימן שקל ופסיקות
-        price_raw = (tds_clean[8]
-                     .replace('&#8362;', '').replace('₪', '').replace('\u20aa', '')
-                     .replace(',', '').strip())
-        try:
-            price = int(price_raw)
-        except ValueError:
-            price = 0
-
-        # לינק
-        link_m = re.search(r'href="(/rent/viewad[^"]+)"', content)
-        link   = f"https://www.homeless.co.il{link_m.group(1)}" if link_m else ""
-
-        listings.append({
-            "id":     f"homeless_{ad_id}",
-            "source": "הומלס",
-            "label":  label,
-            "price":  price,
-            "rooms":  tds_clean[6] if len(tds_clean) > 6 else "",
-            "size":   "",
-            "city":   tds_clean[3] if len(tds_clean) > 3 else "",
-            "street": tds_clean[5] if len(tds_clean) > 5 else "",
-            "hood":   tds_clean[4] if len(tds_clean) > 4 else "",
-            "floor":  tds_clean[7] if len(tds_clean) > 7 else "",
-            "link":   link,
-        })
-
-    return listings
-
-def scrape_homeless() -> list:
-    results = []
-    for area in HOMELESS_AREAS:
-        html = fetch_html(area["url"], encoding="windows-1255")
-        if html:
-            listings = parse_homeless(html, area["label"])
-            print(f"[{now_str()}] הומלס| {len(listings):2d} — {area['label']}")
-            results.extend(listings)
-        time.sleep(2)
-    return results
 
 # ══════════════════════════════════════════════════════
 #  ריצה ראשית
@@ -345,7 +266,6 @@ def scrape_homeless() -> list:
 SCRAPERS = [
     ("יד2",   scrape_yad2),
     ("קומו",  scrape_komo),
-    ("הומלס", scrape_homeless),
 ]
 
 def check_all():
@@ -389,7 +309,7 @@ def scan_silent() -> set:
 if __name__ == "__main__":
     n = len(YAD2_AREAS) + len(KOMO_AREAS)
     print("╔══════════════════════════════════════════════════╗")
-    print("║   מוניטור דירות — יד2 + קומו + הומלס — פועל!  ║")
+    print("║   מוניטור דירות — יד2 + קומו !  ║")
     print("║  05:30–23:30  →  כל 15 דקות                    ║")
     print("║  23:30–05:30  →  רק ב-23:30 ושוב ב-05:30       ║")
     print(f"║  2-3 חדרים | 50+ מ״ר | עד 5500₪               ║")
