@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """
-יד2 מוניטור דירות — גרסה עם debug
+יד2 מוניטור דירות — גרסה סופית
+
+איך הסקריפט יודע מה "חדש":
+  כל מודעה מקבלת token ייחודי מיד2 (למשל "t7u4pkiu").
+  בהפעלה הראשונה: הסקריפט סורק את כל הדירות הקיימות,
+  שומר את כל ה-tokens בקובץ seen_listings.json, ולא שולח כלום.
+  מהבדיקה השנייה: רק tokens שלא היו בקובץ = דירה חדשה → התראה.
+
+לוח זמנים:
+  05:30 - 23:30  →  בדיקה כל 15 דקות
+  23:30 - 05:30  →  בדיקה ב-23:30 ושוב ב-05:30
 """
 
 import json
@@ -14,7 +24,7 @@ SEEN_IDS_FILE = "seen_listings.json"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "")
 
-BASE_PARAMS = "maxPrice=5500&minRooms=2&maxRooms=3&minSquaremeter=50&property=1"
+BASE_PARAMS = "maxPrice=5500&minRooms=2&maxRooms=3&minSquaremeter=50"
 BASE = "https://www.yad2.co.il/realestate/rent/center-and-sharon"
 
 SEARCH_AREAS = [
@@ -65,7 +75,7 @@ def is_time_to_check() -> bool:
     return (t.hour == 23 and t.minute == 30) or (t.hour == 5 and t.minute == 30)
 
 
-def load_seen_ids():
+def load_seen_ids() -> set:
     if os.path.exists(SEEN_IDS_FILE):
         with open(SEEN_IDS_FILE, "r") as f:
             return set(json.load(f))
@@ -83,15 +93,11 @@ def parse_listings(html: str, area_label: str) -> list:
         html, re.DOTALL
     )
     if not match:
-        print(f"[{now_str()}] ⚠️  לא נמצא __NEXT_DATA__ ב-{area_label} (html length={len(html)})")
-        # הדפס 500 תווים ראשונים לאבחון
-        print(f"[{now_str()}] HTML preview: {html[:500]}")
         return []
     try:
         data  = json.loads(match.group(1))
         feed  = data["props"]["pageProps"]["feed"]
         items = feed.get("private", []) + feed.get("agency", []) + feed.get("platinum", [])
-        print(f"[{now_str()}] 📊 {area_label}: private={len(feed.get('private',[]))}, agency={len(feed.get('agency',[]))}")
         listings = []
         for item in items:
             token   = item.get("token", "")
@@ -115,23 +121,22 @@ def parse_listings(html: str, area_label: str) -> list:
                 })
         return listings
     except Exception as e:
-        print(f"[{now_str()}] ❌ שגיאת parse ב-{area_label}: {e}")
+        print(f"[{now_str()}] שגיאת parse ב-{area_label}: {e}")
         return []
 
 
 def fetch_listings(area: dict) -> list:
     try:
         session = requests.Session()
-        # קודם דף הבית לקבלת cookies
         session.get("https://www.yad2.co.il", headers=HEADERS, timeout=15)
         time.sleep(1)
         resp = session.get(area["url"], headers=HEADERS, timeout=20)
-        print(f"[{now_str()}] HTTP {resp.status_code} | len={len(resp.text)} | {area['label']}")
         if resp.status_code == 200:
             return parse_listings(resp.text, area["label"])
+        print(f"[{now_str()}] HTTP {resp.status_code} ב-{area['label']}")
         return []
     except Exception as e:
-        print(f"[{now_str()}] ❌ שגיאה ב-{area['label']}: {e}")
+        print(f"[{now_str()}] שגיאה ב-{area['label']}: {e}")
         return []
 
 
@@ -142,9 +147,36 @@ def send_telegram(message: str):
             json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
             timeout=10
         ).raise_for_status()
-        print(f"[{now_str()}] ✓ Telegram נשלח")
     except Exception as e:
-        print(f"[{now_str()}] ❌ Telegram: {e}")
+        print(f"[{now_str()}] שגיאת Telegram: {e}")
+
+
+def scan_all_areas(silent: bool = False) -> set:
+    """סורק את כל האזורים ומחזיר set של כל ה-IDs שנמצאו."""
+    all_ids = set()
+    for area in SEARCH_AREAS:
+        listings = fetch_listings(area)
+        for listing in listings:
+            if listing["id"]:
+                all_ids.add(listing["id"])
+                if not silent:
+                    # שלח התראה
+                    floor_str = f"\n🏢 קומה: {listing['floor']}" if listing['floor'] != "" else ""
+                    hood_str  = f"\n🏘 שכונה: {listing['hood']}" if listing['hood'] else ""
+                    send_telegram(
+                        f"🏠 <b>דירה חדשה! {listing['area_label']}</b>\n\n"
+                        f"📍 {listing['city']} - {listing['street']}{hood_str}{floor_str}\n"
+                        f"🛏 חדרים: {listing['rooms']}\n"
+                        f"📐 שטח: {listing['size']} מ\"ר\n"
+                        f"💰 מחיר: {listing['price']:,} ₪\n"
+                        f"🔗 <a href=\"{listing['link']}\">לצפייה במודעה</a>"
+                    )
+                    print(f"[{now_str()}] 🆕 {listing['area_label']} | {listing['street']} | {listing['rooms']} חד׳ | {listing['price']}₪")
+                    time.sleep(1)
+        status = f"{len(listings)} נבדקו" if listings else "0"
+        print(f"[{now_str()}] ✓  {status} — {area['label']}")
+        time.sleep(2)
+    return all_ids
 
 
 def check_all_areas():
@@ -167,11 +199,13 @@ def check_all_areas():
                     f"💰 מחיר: {listing['price']:,} ₪\n"
                     f"🔗 <a href=\"{listing['link']}\">לצפייה במודעה</a>"
                 )
+                print(f"[{now_str()}] 🆕 {area['label']} | {listing['street']} | {listing['rooms']} חד׳ | {listing['price']}₪")
                 seen_ids.add(listing["id"])
                 new_in_area += 1
                 total_new   += 1
                 time.sleep(1)
-        print(f"[{now_str()}] {'🆕 ' + str(new_in_area) if new_in_area else '✓  ' + str(len(listings))} — {area['label']}")
+        status = f"{len(listings)} נבדקו" if listings else "0"
+        print(f"[{now_str()}] {'🆕 ' + str(new_in_area) if new_in_area else '✓  ' + status} — {area['label']}")
         time.sleep(2)
 
     save_seen_ids(seen_ids)
@@ -187,7 +221,15 @@ if __name__ == "__main__":
     print(f"║  {len(SEARCH_AREAS)} אזורים                                   ║")
     print("╚══════════════════════════════════════════════════╝\n")
 
-    check_all_areas()
+    if not os.path.exists(SEEN_IDS_FILE):
+        # הפעלה ראשונה — סרוק הכל בשקט, שמור IDs, אל תשלח כלום
+        print(f"[{now_str()}] 🚀 הפעלה ראשונה — סורק דירות קיימות (לא ישלח התראות)...")
+        existing_ids = scan_all_areas(silent=True)
+        save_seen_ids(existing_ids)
+        print(f"[{now_str()}] ✅ נשמרו {len(existing_ids)} דירות קיימות. מעכשיו — רק דירות חדשות יישלחו!\n")
+    else:
+        # הפעלות הבאות — בדיקה רגילה
+        check_all_areas()
 
     while True:
         seconds_to_next_minute = 60 - datetime.now().second
