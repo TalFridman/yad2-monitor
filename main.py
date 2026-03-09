@@ -100,7 +100,7 @@ def is_time_to_check() -> bool:
     m = t.hour * 60 + t.minute
     if 5 * 60 + 30 <= m < 23 * 60 + 30:
         return t.minute % 15 == 0
-    return (t.hour == 23 and t.minute == 30) or (t.hour == 5 and t.minute == 30)
+    return (t.hour == 21 and t.minute == 30) or (t.hour == 3 and t.minute == 30)
 
 def load_seen_ids() -> set:
     if os.path.exists(SEEN_IDS_FILE):
