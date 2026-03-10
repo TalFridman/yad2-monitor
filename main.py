@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 מוניטור דירות — יד2 + קומו
-בוט טלגרם עם פילטרים דינמיים.
+בוט טלגרם עם Supabase DB ופילטרים דינמיים.
 
 לוח זמנים:
   05:30–23:30  → בדיקה כל 15 דקות
@@ -10,7 +10,7 @@
 פקודות בוט:
   /status           — פילטרים נוכחיים
   /filters          — תפריט שינוי פילטרים
-  /seen             — הצג דירות שנצפו
+  /seen             — חיפוש דירות שנסרקו
   /setprice 5500    — מחיר מקסימלי
   /setrooms 2-3     — טווח חדרים
   /setsize 50       — מינימום מ"ר
@@ -24,19 +24,17 @@ from datetime import datetime
 #  הגדרות
 # ══════════════════════════════════════════════════════
 
-SEEN_IDS_FILE      = "seen_listings.json"
-SEEN_DETAILS_FILE  = "seen_details.json"
-FILTERS_FILE       = "filters.json"
-MAX_SEEN_DETAILS   = 300  # מקסימום דירות שנשמרות בפירוט
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "")
-ADMIN_USER_ID      = 336895483  # רק המשתמש הזה יכול לשנות פילטרים
+SUPABASE_URL       = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY       = os.environ.get("SUPABASE_KEY", "")
+ADMIN_USER_ID      = 336895483
 
 DEFAULT_FILTERS = {
-    "max_price":  5500,
-    "min_rooms":  2.0,
-    "max_rooms":  3.0,
-    "min_size":   50,
+    "max_price": 5500,
+    "min_rooms": 2.0,
+    "max_rooms": 3.0,
+    "min_size":  50,
 }
 
 HEADERS = {
@@ -54,35 +52,88 @@ HEADERS = {
 }
 
 # ══════════════════════════════════════════════════════
-#  ניהול פילטרים
+#  Supabase
+# ══════════════════════════════════════════════════════
+
+def sb_headers():
+    return {
+        "apikey":        SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal",
+    }
+
+def sb_get(table: str, params: dict = None):
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers={**sb_headers(), "Prefer": ""},
+            params=params,
+            timeout=10
+        )
+        return r.json() if r.ok else []
+    except Exception as e:
+        print(f"[{now_str()}] supabase get error: {e}")
+        return []
+
+def sb_upsert(table: str, data):
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers={**sb_headers(), "Prefer": "resolution=merge-duplicates"},
+            json=data,
+            timeout=10
+        )
+    except Exception as e:
+        print(f"[{now_str()}] supabase upsert error: {e}")
+
+# ══════════════════════════════════════════════════════
+#  ניהול פילטרים — Supabase
 # ══════════════════════════════════════════════════════
 
 def load_filters() -> dict:
-    if os.path.exists(FILTERS_FILE):
-        try:
-            with open(FILTERS_FILE, "r") as f:
-                return {**DEFAULT_FILTERS, **json.load(f)}
-        except Exception:
-            pass
-    return DEFAULT_FILTERS.copy()
+    rows = sb_get("bot_filters")
+    if not rows:
+        return DEFAULT_FILTERS.copy()
+    f = DEFAULT_FILTERS.copy()
+    for row in rows:
+        key, val = row.get("key"), row.get("value")
+        if key in ("max_price", "min_size"):
+            f[key] = int(val)
+        elif key in ("min_rooms", "max_rooms"):
+            f[key] = float(val)
+    return f
 
 def save_filters(filters: dict):
-    with open(FILTERS_FILE, "w") as f:
-        json.dump(filters, f, ensure_ascii=False, indent=2)
+    rows = [{"key": k, "value": str(v)} for k, v in filters.items()]
+    sb_upsert("bot_filters", rows)
 
 def filters_summary(filters: dict) -> str:
     return (
         f"⚙️ <b>פילטרים נוכחיים:</b>\n\n"
         f"💰 מחיר מקסימלי: <b>{filters['max_price']:,} ₪</b>\n"
-        f"🛏 חדרים: <b>{filters['min_rooms']:.0f}–{filters['max_rooms']:.0f}</b>\n"
-        f'📐 שטח מינימלי: <b>{filters["min_size"]} מ"ר</b>'
+        f"🛏 חדרים: <b>{filters['min_rooms']:.1f}–{filters['max_rooms']:.1f}</b>\n"
+        f"📐 שטח מינימלי: <b>{filters['min_size']} מ\"ר</b>"
     )
 
-def build_yad2_params(f: dict) -> str:
-    return f"maxPrice={f['max_price']}&minRooms={f['min_rooms']}&maxRooms={f['max_rooms']}&minSquaremeter={f['min_size']}"
+# ══════════════════════════════════════════════════════
+#  ניהול דירות שנצפו — Supabase
+# ══════════════════════════════════════════════════════
 
-def build_komo_params(f: dict) -> str:
-    return f"fromRooms={f['min_rooms']}&toRooms={f['max_rooms']}&toPrice={f['max_price']}"
+def load_seen_ids() -> set:
+    rows = sb_get("listings", {"select": "id"})
+    return set(r["id"] for r in rows)
+
+def save_listing(listing: dict):
+    sb_upsert("listings", {
+        "id":     listing["id"],
+        "source": listing.get("source", ""),
+        "city":   listing.get("city", "") or listing.get("label", "").split(",")[0],
+        "street": listing.get("street", ""),
+        "price":  listing.get("price", 0),
+        "rooms":  str(listing.get("rooms", "")),
+        "link":   listing.get("link", ""),
+    })
 
 # ══════════════════════════════════════════════════════
 #  אזורי חיפוש
@@ -132,6 +183,12 @@ KOMO_AREA_DEFS = [
     {"label": "בית עובד",                  "city": "%D7%91%D7%99%D7%AA+%D7%A2%D7%95%D7%91%D7%93"},
 ]
 
+def build_yad2_params(f: dict) -> str:
+    return f"maxPrice={f['max_price']}&minRooms={f['min_rooms']}&maxRooms={f['max_rooms']}&minSquaremeter={f['min_size']}"
+
+def build_komo_params(f: dict) -> str:
+    return f"fromRooms={f['min_rooms']}&toRooms={f['max_rooms']}&toPrice={f['max_price']}"
+
 def get_yad2_areas(f: dict) -> list:
     p = build_yad2_params(f)
     return [{"label": a["label"], "url": f"{_Y}?{p}&{a['params']}"} for a in YAD2_AREA_DEFS]
@@ -157,45 +214,6 @@ def is_time_to_check() -> bool:
     if 5 * 60 + 30 <= m < 23 * 60 + 30:
         return t.minute % 15 == 0
     return (t.hour == 23 and t.minute == 30) or (t.hour == 5 and t.minute == 30)
-
-def load_seen_ids() -> set:
-    if os.path.exists(SEEN_IDS_FILE):
-        with open(SEEN_IDS_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-def save_seen_ids(ids: set):
-    with open(SEEN_IDS_FILE, "w") as f:
-        json.dump(list(ids), f)
-
-def load_seen_details() -> list:
-    if os.path.exists(SEEN_DETAILS_FILE):
-        try:
-            with open(SEEN_DETAILS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
-def save_seen_details(details: list):
-    # שמור רק את ה-MAX_SEEN_DETAILS האחרונות
-    with open(SEEN_DETAILS_FILE, "w", encoding="utf-8") as f:
-        json.dump(details[-MAX_SEEN_DETAILS:], f, ensure_ascii=False, indent=2)
-
-def add_seen_detail(listing: dict):
-    details = load_seen_details()
-    # הוסף רק אם לא קיים כבר
-    if not any(d["id"] == listing["id"] for d in details):
-        details.append({
-            "id":     listing["id"],
-            "source": listing.get("source", ""),
-            "city":   listing.get("city", "") or listing.get("label", "").split(",")[0],
-            "street": listing.get("street", ""),
-            "price":  listing.get("price", 0),
-            "rooms":  listing.get("rooms", ""),
-            "link":   listing.get("link", ""),
-        })
-        save_seen_details(details)
 
 def send_telegram(message: str, reply_markup=None):
     try:
@@ -224,7 +242,7 @@ def answer_callback(callback_id: str, text: str = ""):
     except Exception:
         pass
 
-def fetch_html(url: str, homepage: str = None, encoding: str = None):
+def fetch_html(url: str, homepage: str = None):
     try:
         session = requests.Session()
         if homepage:
@@ -232,8 +250,6 @@ def fetch_html(url: str, homepage: str = None, encoding: str = None):
             time.sleep(1)
         resp = session.get(url, headers=HEADERS, timeout=20)
         if resp.status_code == 200:
-            if encoding:
-                resp.encoding = encoding
             return resp.text
         print(f"[{now_str()}] HTTP {resp.status_code} — {url[:70]}")
         return None
@@ -245,14 +261,14 @@ def format_message(l: dict) -> str:
     floor_str = f"\n🏢 קומה: {l['floor']}" if l.get("floor") else ""
     hood_str  = f"\n🏘 שכונה: {l['hood']}"  if l.get("hood")  else ""
     price_str = f"{l['price']:,}" if l.get("price") else "לא צוין"
-    size_str  = f'{l["size"]} מ"ר' if l.get("size") else "לא צוין"
+    size_str  = f"{l['size']} מ\"ר" if l.get("size") else "לא צוין"
     return (
         f"🏠 <b>[{l['source']}] {l['label']}</b>\n\n"
         f"📍 {l['city']} - {l['street']}{hood_str}{floor_str}\n"
         f"🛏 חדרים: {l['rooms']}\n"
         f"📐 שטח: {size_str}\n"
         f"💰 מחיר: {price_str} ₪\n"
-        f'🔗 <a href="{l["link"]}">לצפייה במודעה</a>'
+        f"🔗 <a href=\"{l['link']}\">לצפייה במודעה</a>"
     )
 
 # ══════════════════════════════════════════════════════
@@ -359,115 +375,190 @@ def scrape_komo(filters: dict) -> list:
         time.sleep(2)
     return results
 
+SCRAPERS = [
+    ("יד2",  scrape_yad2),
+    ("קומו", scrape_komo),
+]
+
+# ══════════════════════════════════════════════════════
+#  מסך /seen — state לכל שיחה
+# ══════════════════════════════════════════════════════
+# seen_state שומר את הבחירות של המשתמש בין לחיצות כפתורים
+# מבנה: {
+#   "sources":   set()   — אתרים שנבחרו
+#   "cities":    set()   — ערים שנבחרו
+#   "rooms":     set()   — חדרים שנבחרו
+#   "min_price": int|None
+#   "max_price": int|None
+# }
+
+seen_state = {
+    "sources":   set(),
+    "cities":    set(),
+    "rooms":     set(),
+    "min_price": None,
+    "max_price": None,
+}
+
+MIN_PRICE_OPTIONS = [0, 2000, 3000, 4000, 5000]
+MAX_PRICE_OPTIONS = [4000, 5000, 5500, 6000, 7000, 8000]
+ROOMS_OPTIONS     = ["1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5"]
+
+def get_seen_cities() -> list:
+    rows = sb_get("listings", {"select": "city", "city": "not.is.null"})
+    cities = sorted(set(r["city"] for r in rows if r.get("city")))
+    return cities
+
+def tick(val, selected_set) -> str:
+    return f"✅ {val}" if val in selected_set else val
+
+def tick_price(val, current) -> str:
+    return f"✅ {val:,}" if val == current else f"{val:,}"
+
+def build_seen_keyboard() -> dict:
+    s = seen_state
+    cities = get_seen_cities()
+
+    # שורות ערים — 2 בכל שורה
+    city_rows = []
+    row = []
+    for city in cities:
+        row.append({"text": tick(city, s["cities"]), "callback_data": f"seen_tog_city_{city}"})
+        if len(row) == 2:
+            city_rows.append(row)
+            row = []
+    if row:
+        city_rows.append(row)
+
+    # שורות חדרים — 3 בכל שורה
+    rooms_rows = []
+    row = []
+    for r in ROOMS_OPTIONS:
+        row.append({"text": tick(r, s["rooms"]), "callback_data": f"seen_tog_rooms_{r}"})
+        if len(row) == 3:
+            rooms_rows.append(row)
+            row = []
+    if row:
+        rooms_rows.append(row)
+
+    keyboard = [
+        # אתר
+        [{"text": "── אתר ──", "callback_data": "seen_noop"}],
+        [
+            {"text": tick("יד2",  s["sources"]), "callback_data": "seen_tog_src_יד2"},
+            {"text": tick("קומו", s["sources"]), "callback_data": "seen_tog_src_קומו"},
+        ],
+        # עיר
+        [{"text": "── עיר ──", "callback_data": "seen_noop"}],
+        *city_rows,
+        # חדרים
+        [{"text": "── חדרים ──", "callback_data": "seen_noop"}],
+        *rooms_rows,
+        # מחיר מינימום
+        [{"text": "── מחיר מינימום ──", "callback_data": "seen_noop"}],
+        [{"text": tick_price(p, s["min_price"]), "callback_data": f"seen_min_{p}"} for p in MIN_PRICE_OPTIONS[:3]],
+        [{"text": tick_price(p, s["min_price"]), "callback_data": f"seen_min_{p}"} for p in MIN_PRICE_OPTIONS[3:]],
+        # מחיר מקסימום
+        [{"text": "── מחיר מקסימום ──", "callback_data": "seen_noop"}],
+        [{"text": tick_price(p, s["max_price"]), "callback_data": f"seen_max_{p}"} for p in MAX_PRICE_OPTIONS[:3]],
+        [{"text": tick_price(p, s["max_price"]), "callback_data": f"seen_max_{p}"} for p in MAX_PRICE_OPTIONS[3:]],
+        # כפתורי פעולה
+        [
+            {"text": "🔍 חפש", "callback_data": "seen_search"},
+            {"text": "🔄 נקה", "callback_data": "seen_clear"},
+        ],
+    ]
+    return {"inline_keyboard": keyboard}
+
+def reset_seen_state():
+    seen_state["sources"]   = set()
+    seen_state["cities"]    = set()
+    seen_state["rooms"]     = set()
+    seen_state["min_price"] = None
+    seen_state["max_price"] = None
+
+def send_seen_menu():
+    reset_seen_state()
+    total = len(sb_get("listings", {"select": "id"}))
+    send_telegram(
+        f"🔍 <b>חיפוש דירות שנסרקו</b> — {total} בסך הכל\n\nבחר מסננים (אפשר כמה) ולחץ 🔍 חפש:",
+        reply_markup=build_seen_keyboard()
+    )
+
+def run_seen_search():
+    s = seen_state
+    params = {"select": "source,city,street,price,rooms,link", "order": "seen_at.desc"}
+
+    if s["sources"]:
+        src_list = ",".join(f'"{x}"' for x in s["sources"])
+        params["source"] = f"in.({src_list})"
+    if s["cities"]:
+        city_list = ",".join(f'"{x}"' for x in s["cities"])
+        params["city"] = f"in.({city_list})"
+    if s["min_price"] is not None:
+        params["price"] = f"gte.{s['min_price']}"
+    if s["max_price"] is not None:
+        # אם יש גם min וגם max — Supabase צריך range נפרד
+        if s["min_price"] is not None:
+            params["price"] = f"gte.{s['min_price']}&price=lte.{s['max_price']}"
+        else:
+            params["price"] = f"lte.{s['max_price']}"
+
+    rows = sb_get("listings", params)
+
+    # סינון חדרים בצד הלקוח (כי rooms שמור כ-TEXT)
+    if s["rooms"]:
+        rows = [r for r in rows if str(r.get("rooms", "")) in s["rooms"]]
+
+    if not rows:
+        send_telegram("📭 לא נמצאו דירות לפי הסינון שנבחר.")
+        return
+
+    lines = [f"🏠 <b>תוצאות חיפוש ({len(rows)} דירות):</b>\n"]
+    for r in rows:
+        price = f"{r['price']:,}₪" if r.get("price") else "?"
+        lines.append(
+            f"• <b>{r.get('source','')}</b> | {r.get('city','')} {r.get('street','')} | "
+            f"{r.get('rooms','')}חד׳ | {price} — <a href=\"{r.get('link','')}\">קישור</a>"
+        )
+
+    # שלח בחלקים אם ארוך מדי
+    chunk, chunks = [], []
+    for line in lines:
+        chunk.append(line)
+        if len("\n".join(chunk)) > 3800:
+            chunks.append("\n".join(chunk[:-1]))
+            chunk = [line]
+    chunks.append("\n".join(chunk))
+    for msg in chunks:
+        if msg.strip():
+            send_telegram(msg)
+            time.sleep(0.3)
+
+# ══════════════════════════════════════════════════════
+#  תפריט /filters
+# ══════════════════════════════════════════════════════
+
+def send_filters_menu(filters: dict):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": f"💰 מחיר: {filters['max_price']:,}₪",                              "callback_data": "menu_price"}],
+            [{"text": f"🛏 חדרים: {filters['min_rooms']:.1f}–{filters['max_rooms']:.1f}", "callback_data": "menu_rooms"}],
+            [{"text": f"📐 שטח מינ': {filters['min_size']} מ\"ר",                         "callback_data": "menu_size"}],
+            [{"text": "🔄 איפוס לברירת מחדל",                                             "callback_data": "cmd_reset"}],
+        ]
+    }
+    send_telegram(filters_summary(filters) + "\n\nלחץ על כפתור לשינוי:", reply_markup=keyboard)
+
 # ══════════════════════════════════════════════════════
 #  טיפול בפקודות טלגרם
 # ══════════════════════════════════════════════════════
 
 _last_update_id = 0
 
-# ── דירות שנצפו ──────────────────────────────────────
-
-def send_seen_menu():
-    details = load_seen_details()
-    count   = len(details)
-    sources = sorted(set(d["source"] for d in details))
-    source_btns = [{"text": f"📋 {s}", "callback_data": f"seen_source_{s}"} for s in sources]
-    keyboard = {"inline_keyboard": [
-        [{"text": f"🏠 הצג הכל ({count} דירות)", "callback_data": "seen_all"}],
-        source_btns if source_btns else [],
-        [{"text": "« סגור", "callback_data": "seen_close"}],
-    ]}
-    send_telegram(f"🔍 <b>דירות שנצפו</b> — {count} בסך הכל\n\nבחר תצוגה:", reply_markup=keyboard)
-
-def send_seen_all():
-    details = load_seen_details()
-    if not details:
-        send_telegram("📭 אין דירות שנצפו עדיין.")
-        return
-    lines = [f"🏠 <b>כל הדירות שנצפו ({len(details)}):</b>\n"]
-    for d in reversed(details):
-        price = f"{d['price']:,}₪" if d.get("price") else "?"
-        lines.append(
-            f"• <b>{d['source']}</b> | {d.get('city','')} {d.get('street','')} | "
-            f"{d.get('rooms','')}חד׳ | {price} — <a href=\"{d['link']}\">קישור</a>"
-        )
-    chunk, chunks = [], []
-    for line in lines:
-        chunk.append(line)
-        if len("\n".join(chunk)) > 3500:
-            chunks.append("\n".join(chunk[:-1]))
-            chunk = [line]
-    chunks.append("\n".join(chunk))
-    for msg in chunks:
-        send_telegram(msg)
-        time.sleep(0.5)
-
-def send_seen_by_source(source: str):
-    details = [d for d in load_seen_details() if d["source"] == source]
-    if not details:
-        send_telegram(f"📭 אין דירות שנצפו מ-{source}.")
-        return
-    cities = sorted(set(d.get("city", "") for d in details if d.get("city")))
-    city_btns, row = [], []
-    for city in cities:
-        cnt = sum(1 for d in details if d.get("city") == city)
-        row.append({"text": f"{city} ({cnt})", "callback_data": f"seen_city_{source}|||{city}"})
-        if len(row) == 2:
-            city_btns.append(row)
-            row = []
-    if row:
-        city_btns.append(row)
-    city_btns.append([{"text": f"🏠 הכל מ-{source} ({len(details)})", "callback_data": f"seen_srcall_{source}"}])
-    city_btns.append([{"text": "« חזרה", "callback_data": "seen_back"}])
-    send_telegram(f"📋 <b>{source}</b> — {len(details)} דירות\n\nבחר עיר:", reply_markup={"inline_keyboard": city_btns})
-
-def send_seen_by_city(source: str, city: str):
-    details = [d for d in load_seen_details() if d["source"] == source and d.get("city") == city]
-    if not details:
-        send_telegram(f"📭 אין דירות מ-{source} ב{city}.")
-        return
-    lines = [f"📍 <b>{source} | {city} ({len(details)}):</b>\n"]
-    for d in reversed(details):
-        price = f"{d['price']:,}₪" if d.get("price") else "?"
-        lines.append(f"• {d.get('street','')} | {d.get('rooms','')}חד׳ | {price} — <a href=\"{d['link']}\">קישור</a>")
-    send_telegram("\n".join(lines))
-
-def send_seen_srcall(source: str):
-    details = [d for d in load_seen_details() if d["source"] == source]
-    if not details:
-        send_telegram(f"📭 אין דירות מ-{source}.")
-        return
-    lines = [f"📋 <b>{source} — {len(details)} דירות:</b>\n"]
-    for d in reversed(details):
-        price = f"{d['price']:,}₪" if d.get("price") else "?"
-        lines.append(
-            f"• {d.get('city','')} {d.get('street','')} | {d.get('rooms','')}חד׳ | {price} — <a href=\"{d['link']}\">קישור</a>"
-        )
-    chunk, chunks = [], []
-    for line in lines:
-        chunk.append(line)
-        if len("\n".join(chunk)) > 3500:
-            chunks.append("\n".join(chunk[:-1]))
-            chunk = [line]
-    chunks.append("\n".join(chunk))
-    for msg in chunks:
-        send_telegram(msg)
-        time.sleep(0.5)
-
-def send_filters_menu(filters: dict):
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": f"💰 מחיר: {filters['max_price']:,}₪",                    "callback_data": "menu_price"}],
-            [{"text": f"🛏 חדרים: {filters['min_rooms']:.0f}–{filters['max_rooms']:.0f}", "callback_data": "menu_rooms"}],
-            [{"text": f"📐 שטח מינ': {filters['min_size']} מ\"ר",               "callback_data": "menu_size"}],
-            [{"text": "🔄 איפוס לברירת מחדל",                                   "callback_data": "cmd_reset"}],
-        ]
-    }
-    send_telegram(filters_summary(filters) + "\n\nלחץ על כפתור לשינוי:", reply_markup=keyboard)
-
 def handle_command(text: str, user_id: int):
     filters = load_filters()
-    text = text.strip()
+    text    = text.strip()
 
     if text.startswith("/status"):
         return filters_summary(filters)
@@ -504,7 +595,7 @@ def handle_command(text: str, user_id: int):
         filters["min_rooms"] = mn
         filters["max_rooms"] = mx
         save_filters(filters)
-        return f"✅ חדרים עודכנו ל-{mn:.0f}–{mx:.0f}\n\n" + filters_summary(filters)
+        return f"✅ חדרים עודכנו ל-{mn:.1f}–{mx:.1f}\n\n" + filters_summary(filters)
 
     m = re.match(r'/setsize\S*\s+(\d+)', text)
     if m:
@@ -520,7 +611,7 @@ def handle_command(text: str, user_id: int):
             "📋 <b>פקודות זמינות:</b>\n\n"
             "/status — פילטרים נוכחיים\n"
             "/filters — תפריט שינוי פילטרים\n"
-            "/seen — דירות שנצפו\n"
+            "/seen — חיפוש דירות שנסרקו\n"
             "/setprice 5500 — מחיר מקסימלי\n"
             "/setrooms 2-3 — טווח חדרים\n"
             "/setsize 50 — מינימום מ\"ר\n"
@@ -533,48 +624,78 @@ def handle_callback(cb: dict):
     data    = cb.get("data", "")
     user_id = cb["from"]["id"]
 
+    # ── seen callbacks (כולם מותרים לכולם) ──────────────
+
+    if data == "seen_noop":
+        answer_callback(cid)
+        return
+
+    if data == "seen_clear":
+        reset_seen_state()
+        answer_callback(cid, "🔄 מסננים נוקו")
+        send_telegram("🔍 מסננים נוקו — בחר מחדש:", reply_markup=build_seen_keyboard())
+        return
+
+    if data == "seen_search":
+        answer_callback(cid, "🔍 מחפש...")
+        run_seen_search()
+        return
+
+    if data.startswith("seen_tog_src_"):
+        src = data[len("seen_tog_src_"):]
+        if src in seen_state["sources"]:
+            seen_state["sources"].discard(src)
+        else:
+            seen_state["sources"].add(src)
+        answer_callback(cid)
+        send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
+        return
+
+    if data.startswith("seen_tog_city_"):
+        city = data[len("seen_tog_city_"):]
+        if city in seen_state["cities"]:
+            seen_state["cities"].discard(city)
+        else:
+            seen_state["cities"].add(city)
+        answer_callback(cid)
+        send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
+        return
+
+    if data.startswith("seen_tog_rooms_"):
+        r = data[len("seen_tog_rooms_"):]
+        if r in seen_state["rooms"]:
+            seen_state["rooms"].discard(r)
+        else:
+            seen_state["rooms"].add(r)
+        answer_callback(cid)
+        send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
+        return
+
+    if data.startswith("seen_min_"):
+        val = int(data.split("_")[-1])
+        seen_state["min_price"] = None if seen_state["min_price"] == val else val
+        answer_callback(cid)
+        send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
+        return
+
+    if data.startswith("seen_max_"):
+        val = int(data.split("_")[-1])
+        seen_state["max_price"] = None if seen_state["max_price"] == val else val
+        answer_callback(cid)
+        send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
+        return
+
+    # ── filters callbacks (admin בלבד) ───────────────────
+
     if user_id != ADMIN_USER_ID:
         answer_callback(cid, "⛔ רק המנהל יכול לשנות פילטרים.")
         return
 
     filters = load_filters()
-
     price_options = [3000, 3500, 4000, 4500, 5000, 5500, 6000, 7000]
-    rooms_options = [("1–2", 1.0, 2.0), ("2–3", 2.0, 3.0), ("2.5–4", 2.5, 4.0), ("3–4", 3.0, 4.0), ("3–5", 3.0, 5.0)]
+    rooms_options = [("1–2", 1.0, 2.0), ("2–3", 2.0, 3.0), ("2–3.5", 2.0, 3.5),
+                     ("2.5–4", 2.5, 4.0), ("3–4", 3.0, 4.0), ("3–5", 3.0, 5.0)]
     size_options  = [30, 40, 50, 60, 70, 80]
-
-    if data == "seen_all":
-        answer_callback(cid)
-        send_seen_all()
-        return
-
-    if data == "seen_back":
-        answer_callback(cid)
-        send_seen_menu()
-        return
-
-    if data == "seen_close":
-        answer_callback(cid, "סגור ✓")
-        return
-
-    if data.startswith("seen_source_"):
-        source = data[len("seen_source_"):]
-        answer_callback(cid)
-        send_seen_by_source(source)
-        return
-
-    if data.startswith("seen_city_"):
-        parts = data[len("seen_city_"):].split("|||", 1)
-        if len(parts) == 2:
-            answer_callback(cid)
-            send_seen_by_city(parts[0], parts[1])
-        return
-
-    if data.startswith("seen_srcall_"):
-        source = data[len("seen_srcall_"):]
-        answer_callback(cid)
-        send_seen_srcall(source)
-        return
 
     if data == "menu_price":
         keyboard = {"inline_keyboard": [
@@ -608,21 +729,21 @@ def handle_callback(cb: dict):
 
     if data == "menu_back":
         answer_callback(cid)
-        send_filters_menu(filters)
+        send_filters_menu(load_filters())
         return
 
     if data == "cmd_reset":
         save_filters(DEFAULT_FILTERS.copy())
         answer_callback(cid, "✅ אופס!")
-        send_telegram("✅ פילטרים אופסו לברירת מחדל!\n\n" + filters_summary(DEFAULT_FILTERS))
+        send_telegram("✅ פילטרים אופסו!\n\n" + filters_summary(DEFAULT_FILTERS))
         return
 
     if data.startswith("set_price_"):
         val = int(data.split("_")[-1])
         filters["max_price"] = val
         save_filters(filters)
-        answer_callback(cid, f"✅ מחיר עודכן ל-{val:,} ₪")
-        send_telegram(f"✅ מחיר מקסימלי עודכן ל-{val:,} ₪\n\n" + filters_summary(filters))
+        answer_callback(cid, f"✅ {val:,} ₪")
+        send_telegram(f"✅ מחיר עודכן ל-{val:,} ₪\n\n" + filters_summary(filters))
         return
 
     if data.startswith("set_rooms_"):
@@ -631,16 +752,16 @@ def handle_callback(cb: dict):
         filters["min_rooms"] = mn
         filters["max_rooms"] = mx
         save_filters(filters)
-        answer_callback(cid, f"✅ חדרים עודכנו")
-        send_telegram(f"✅ חדרים עודכנו ל-{mn:.0f}–{mx:.0f}\n\n" + filters_summary(filters))
+        answer_callback(cid, "✅ חדרים עודכנו")
+        send_telegram(f"✅ חדרים עודכנו ל-{mn:.1f}–{mx:.1f}\n\n" + filters_summary(filters))
         return
 
     if data.startswith("set_size_"):
         val = int(data.split("_")[-1])
         filters["min_size"] = val
         save_filters(filters)
-        answer_callback(cid, f"✅ שטח עודכן ל-{val} מ\"ר")
-        send_telegram(f"✅ שטח מינימלי עודכן ל-{val} מ\"ר\n\n" + filters_summary(filters))
+        answer_callback(cid, f"✅ {val} מ\"ר")
+        send_telegram(f"✅ שטח עודכן ל-{val} מ\"ר\n\n" + filters_summary(filters))
         return
 
     answer_callback(cid)
@@ -673,15 +794,10 @@ def poll_telegram():
 #  ריצה ראשית
 # ══════════════════════════════════════════════════════
 
-SCRAPERS = [
-    ("יד2",  scrape_yad2),
-    ("קומו", scrape_komo),
-]
-
 def check_all():
-    filters = load_filters()
-    print(f"\n[{now_str()}] 🔍 בודק | מחיר≤{filters['max_price']} | {filters['min_rooms']:.0f}-{filters['max_rooms']:.0f}חד' | {filters['min_size']}מ\"ר+")
-    seen_ids  = load_seen_ids()
+    filters  = load_filters()
+    seen_ids = load_seen_ids()
+    print(f"\n[{now_str()}] 🔍 בודק | מחיר≤{filters['max_price']} | {filters['min_rooms']:.1f}-{filters['max_rooms']:.1f}חד' | {filters['min_size']}מ\"ר+")
     total_new = 0
     for name, scraper in SCRAPERS:
         print(f"[{now_str()}] ── {name} ──")
@@ -694,28 +810,30 @@ def check_all():
         for l in listings:
             if l["id"] and l["id"] not in seen_ids:
                 send_telegram(format_message(l))
-                add_seen_detail(l)
-                print(f"[{now_str()}] 🆕 [{name}] {l['label']} | {l['rooms']}חד' | {l['price']}₪")
+                save_listing(l)
                 seen_ids.add(l["id"])
+                print(f"[{now_str()}] 🆕 [{name}] {l['label']} | {l['rooms']}חד' | {l['price']}₪")
                 new_count += 1
                 total_new += 1
                 time.sleep(1)
         print(f"[{now_str()}] {name}: {len(listings)} נבדקו, {new_count} חדשות")
-    save_seen_ids(seen_ids)
     print(f"[{now_str()}] סיום. {'🎉 ' + str(total_new) + ' חדשות!' if total_new else 'אין חדש.'}")
 
-def scan_silent() -> set:
-    filters = load_filters()
-    all_ids = set()
+def scan_silent():
+    filters  = load_filters()
+    seen_ids = load_seen_ids()
+    count    = 0
     for name, scraper in SCRAPERS:
         print(f"[{now_str()}] סורק {name} בשקט...")
         try:
             for l in scraper(filters):
-                if l["id"]:
-                    all_ids.add(l["id"])
+                if l["id"] and l["id"] not in seen_ids:
+                    save_listing(l)
+                    seen_ids.add(l["id"])
+                    count += 1
         except Exception as e:
             print(f"[{now_str()}] error {name}: {e}")
-    return all_ids
+    return count
 
 if __name__ == "__main__":
     filters = load_filters()
@@ -724,17 +842,17 @@ if __name__ == "__main__":
     print("║       מוניטור דירות — יד2 + קומו — פועל!       ║")
     print("║  05:30–23:30  →  כל 15 דקות                    ║")
     print("║  23:30–05:30  →  רק ב-23:30 ושוב ב-05:30       ║")
-    print(f"║  {filters['min_rooms']:.0f}-{filters['max_rooms']:.0f} חדרים | {filters['min_size']}+ מ\u05f4ר | עד {filters['max_price']:,}\u20aa          \u2551")
+    print(f"║  {filters['min_rooms']:.1f}-{filters['max_rooms']:.1f} חדרים | {filters['min_size']}+ מ\u05f4ר | עד {filters['max_price']:,}\u20aa         \u2551")
     print(f"║  {n} אזורים על פני {len(SCRAPERS)} אתרים                        ║")
     print("╚══════════════════════════════════════════════════╝\n")
 
     threading.Thread(target=poll_telegram, daemon=True).start()
 
-    if not os.path.exists(SEEN_IDS_FILE):
+    existing = load_seen_ids()
+    if not existing:
         print(f"[{now_str()}] 🚀 הפעלה ראשונה — סורק הכל בשקט (ללא התראות)...")
-        existing = scan_silent()
-        save_seen_ids(existing)
-        print(f"[{now_str()}] ✅ נשמרו {len(existing)} מודעות. מעכשיו — רק חדשות!\n")
+        count = scan_silent()
+        print(f"[{now_str()}] ✅ נשמרו {count} מודעות ב-DB. מעכשיו — רק חדשות!\n")
     else:
         check_all()
 
