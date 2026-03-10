@@ -332,7 +332,7 @@ def parse_komo(html: str, label: str) -> list:
             continue
         seen_ids.add(mid)
         pos   = m.start()
-        block = html[max(0, pos - 600):pos + 200]
+        block = html[max(0, pos - 2200):pos + 200]
         price_m = re.search(r'([\d,]+)\s*&#8362;|([0-9,]+)\s*₪', block)
         price   = 0
         if price_m:
