@@ -87,6 +87,19 @@ def sb_upsert(table: str, data):
     except Exception as e:
         print(f"[{now_str()}] supabase upsert error: {e}")
 
+def sb_update(table: str, match: dict, data: dict):
+    try:
+        params = {k: f"eq.{v}" for k, v in match.items()}
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=sb_headers(),
+            params=params,
+            json=data,
+            timeout=10
+        )
+    except Exception as e:
+        print(f"[{now_str()}] supabase update error: {e}")
+
 # ══════════════════════════════════════════════════════
 #  ניהול פילטרים — Supabase
 # ══════════════════════════════════════════════════════
@@ -117,7 +130,7 @@ def filters_summary(filters: dict) -> str:
     )
 
 # ══════════════════════════════════════════════════════
-#  ניהול דירות שנצפו — Supabase
+#  ניהול דירות — Supabase
 # ══════════════════════════════════════════════════════
 
 def load_seen_ids() -> set:
@@ -320,7 +333,7 @@ def scrape_yad2(filters: dict) -> list:
     return results
 
 # ══════════════════════════════════════════════════════
-#  קומו — סקרפר
+#  קומו — סקרפר (תוקן)
 # ══════════════════════════════════════════════════════
 
 def parse_komo(html: str, label: str) -> list:
@@ -332,23 +345,36 @@ def parse_komo(html: str, label: str) -> list:
             continue
         seen_ids.add(mid)
         pos   = m.start()
-        block = html[max(0, pos - 2200):pos + 200]
-        price_m = re.search(r'([\d,]+)\s*&#8362;|([0-9,]+)\s*₪', block)
-        price   = 0
+        # tdPrice נמצא ~574 לפני, LinkModaaTitle ~342 לפני
+        block = html[max(0, pos - 700):pos + 200]
+
+        # מחיר — חפש class tdPrice ואז מספר לפני ₪
+        price = 0
+        price_m = re.search(r'tdPrice[^>]*>[\s]*([\d,]+)\s*[₪\u20aa]', block)
         if price_m:
-            raw = (price_m.group(1) or price_m.group(2) or "0").replace(",", "")
             try:
-                price = int(raw)
+                price = int(price_m.group(1).replace(",", ""))
             except ValueError:
                 pass
+
+        # כתובת — חפש class LinkModaaTitle ואז הטקסט
+        street = ""
+        street_m = re.search(r'LinkModaaTitle[^>]*>(.*?)</span>', block, re.DOTALL)
+        if street_m:
+            street = re.sub(r'<[^>]+>', '', street_m.group(1)).strip()
+
+        # חדרים
         rooms_m = re.search(r'([\d.]+)\s*חדרים', block)
         rooms   = rooms_m.group(1) if rooms_m else ""
-        size_m  = re.search(r'\((\d+)\s*מ', block)
-        size    = size_m.group(1) if size_m else ""
+
+        # שטח
+        size_m = re.search(r'\((\d+)\s*מ', block)
+        size   = size_m.group(1) if size_m else ""
+
+        # קומה
         floor_m = re.search(r'קומה[:\s]*(\d+)', block)
         floor   = floor_m.group(1) if floor_m else ""
-        title_m = re.search(r'(?:title|alt)="([^"]{5,80})"', block)
-        addr    = title_m.group(1) if title_m else ""
+
         listings.append({
             "id":     f"komo_{mid}",
             "source": "קומו",
@@ -357,7 +383,7 @@ def parse_komo(html: str, label: str) -> list:
             "rooms":  rooms,
             "size":   size,
             "city":   label.split(",")[0],
-            "street": addr,
+            "street": street,
             "hood":   "",
             "floor":  floor,
             "link":   f"https://www.komo.co.il/code/nadlan/details/?modaaNum={mid}",
@@ -381,16 +407,8 @@ SCRAPERS = [
 ]
 
 # ══════════════════════════════════════════════════════
-#  מסך /seen — state לכל שיחה
+#  מסך /seen
 # ══════════════════════════════════════════════════════
-# seen_state שומר את הבחירות של המשתמש בין לחיצות כפתורים
-# מבנה: {
-#   "sources":   set()   — אתרים שנבחרו
-#   "cities":    set()   — ערים שנבחרו
-#   "rooms":     set()   — חדרים שנבחרו
-#   "min_price": int|None
-#   "max_price": int|None
-# }
 
 seen_state = {
     "sources":   set(),
@@ -405,23 +423,21 @@ MAX_PRICE_OPTIONS = [4000, 5000, 5500, 6000, 7000, 8000]
 ROOMS_OPTIONS     = ["1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5"]
 
 def get_seen_cities() -> list:
-    rows = sb_get("listings", {"select": "city", "city": "not.is.null"})
-    cities = sorted(set(r["city"] for r in rows if r.get("city")))
-    return cities
+    rows = sb_get("listings", {"select": "city"})
+    return sorted(set(r["city"] for r in rows if r.get("city")))
 
 def tick(val, selected_set) -> str:
-    return f"✅ {val}" if val in selected_set else val
+    return f"✅ {val}" if val in selected_set else str(val)
 
 def tick_price(val, current) -> str:
-    return f"✅ {val:,}" if val == current else f"{val:,}"
+    label = "ללא" if val == 0 else f"{val:,}"
+    return f"✅ {label}" if val == current else label
 
 def build_seen_keyboard() -> dict:
     s = seen_state
     cities = get_seen_cities()
 
-    # שורות ערים — 2 בכל שורה
-    city_rows = []
-    row = []
+    city_rows, row = [], []
     for city in cities:
         row.append({"text": tick(city, s["cities"]), "callback_data": f"seen_tog_city_{city}"})
         if len(row) == 2:
@@ -430,9 +446,7 @@ def build_seen_keyboard() -> dict:
     if row:
         city_rows.append(row)
 
-    # שורות חדרים — 3 בכל שורה
-    rooms_rows = []
-    row = []
+    rooms_rows, row = [], []
     for r in ROOMS_OPTIONS:
         row.append({"text": tick(r, s["rooms"]), "callback_data": f"seen_tog_rooms_{r}"})
         if len(row) == 3:
@@ -442,27 +456,21 @@ def build_seen_keyboard() -> dict:
         rooms_rows.append(row)
 
     keyboard = [
-        # אתר
         [{"text": "── אתר ──", "callback_data": "seen_noop"}],
         [
             {"text": tick("יד2",  s["sources"]), "callback_data": "seen_tog_src_יד2"},
             {"text": tick("קומו", s["sources"]), "callback_data": "seen_tog_src_קומו"},
         ],
-        # עיר
         [{"text": "── עיר ──", "callback_data": "seen_noop"}],
         *city_rows,
-        # חדרים
         [{"text": "── חדרים ──", "callback_data": "seen_noop"}],
         *rooms_rows,
-        # מחיר מינימום
         [{"text": "── מחיר מינימום ──", "callback_data": "seen_noop"}],
         [{"text": tick_price(p, s["min_price"]), "callback_data": f"seen_min_{p}"} for p in MIN_PRICE_OPTIONS[:3]],
         [{"text": tick_price(p, s["min_price"]), "callback_data": f"seen_min_{p}"} for p in MIN_PRICE_OPTIONS[3:]],
-        # מחיר מקסימום
         [{"text": "── מחיר מקסימום ──", "callback_data": "seen_noop"}],
         [{"text": tick_price(p, s["max_price"]), "callback_data": f"seen_max_{p}"} for p in MAX_PRICE_OPTIONS[:3]],
         [{"text": tick_price(p, s["max_price"]), "callback_data": f"seen_max_{p}"} for p in MAX_PRICE_OPTIONS[3:]],
-        # כפתורי פעולה
         [
             {"text": "🔍 חפש", "callback_data": "seen_search"},
             {"text": "🔄 נקה", "callback_data": "seen_clear"},
@@ -481,7 +489,7 @@ def send_seen_menu():
     reset_seen_state()
     total = len(sb_get("listings", {"select": "id"}))
     send_telegram(
-        f"🔍 <b>חיפוש דירות שנסרקו</b> — {total} בסך הכל\n\nבחר מסננים (אפשר כמה) ולחץ 🔍 חפש:",
+        f"🔍 <b>חיפוש דירות שנסרקו</b> — {total} בסך הכל\n\nבחר מסננים ולחץ 🔍 חפש:",
         reply_markup=build_seen_keyboard()
     )
 
@@ -489,24 +497,26 @@ def run_seen_search():
     s = seen_state
     params = {"select": "source,city,street,price,rooms,link", "order": "seen_at.desc"}
 
+    filters = []
     if s["sources"]:
-        src_list = ",".join(f'"{x}"' for x in s["sources"])
+        src_list = ",".join(s["sources"])
         params["source"] = f"in.({src_list})"
     if s["cities"]:
-        city_list = ",".join(f'"{x}"' for x in s["cities"])
+        city_list = ",".join(s["cities"])
         params["city"] = f"in.({city_list})"
-    if s["min_price"] is not None:
-        params["price"] = f"gte.{s['min_price']}"
+    if s["min_price"] is not None and s["min_price"] > 0:
+        filters.append(("price", "gte", s["min_price"]))
     if s["max_price"] is not None:
-        # אם יש גם min וגם max — Supabase צריך range נפרד
-        if s["min_price"] is not None:
-            params["price"] = f"gte.{s['min_price']}&price=lte.{s['max_price']}"
-        else:
-            params["price"] = f"lte.{s['max_price']}"
+        filters.append(("price", "lte", s["max_price"]))
 
+    # Supabase תומך בפרמטרים מרובים לאותו שדה דרך headers
     rows = sb_get("listings", params)
 
-    # סינון חדרים בצד הלקוח (כי rooms שמור כ-TEXT)
+    # סינון price ו-rooms בצד הלקוח
+    if s["min_price"] is not None and s["min_price"] > 0:
+        rows = [r for r in rows if (r.get("price") or 0) >= s["min_price"]]
+    if s["max_price"] is not None:
+        rows = [r for r in rows if (r.get("price") or 0) <= s["max_price"]]
     if s["rooms"]:
         rows = [r for r in rows if str(r.get("rooms", "")) in s["rooms"]]
 
@@ -522,7 +532,6 @@ def run_seen_search():
             f"{r.get('rooms','')}חד׳ | {price} — <a href=\"{r.get('link','')}\">קישור</a>"
         )
 
-    # שלח בחלקים אם ארוך מדי
     chunk, chunks = [], []
     for line in lines:
         chunk.append(line)
@@ -624,8 +633,6 @@ def handle_callback(cb: dict):
     data    = cb.get("data", "")
     user_id = cb["from"]["id"]
 
-    # ── seen callbacks (כולם מותרים לכולם) ──────────────
-
     if data == "seen_noop":
         answer_callback(cid)
         return
@@ -643,30 +650,21 @@ def handle_callback(cb: dict):
 
     if data.startswith("seen_tog_src_"):
         src = data[len("seen_tog_src_"):]
-        if src in seen_state["sources"]:
-            seen_state["sources"].discard(src)
-        else:
-            seen_state["sources"].add(src)
+        seen_state["sources"].discard(src) if src in seen_state["sources"] else seen_state["sources"].add(src)
         answer_callback(cid)
         send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
         return
 
     if data.startswith("seen_tog_city_"):
         city = data[len("seen_tog_city_"):]
-        if city in seen_state["cities"]:
-            seen_state["cities"].discard(city)
-        else:
-            seen_state["cities"].add(city)
+        seen_state["cities"].discard(city) if city in seen_state["cities"] else seen_state["cities"].add(city)
         answer_callback(cid)
         send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
         return
 
     if data.startswith("seen_tog_rooms_"):
         r = data[len("seen_tog_rooms_"):]
-        if r in seen_state["rooms"]:
-            seen_state["rooms"].discard(r)
-        else:
-            seen_state["rooms"].add(r)
+        seen_state["rooms"].discard(r) if r in seen_state["rooms"] else seen_state["rooms"].add(r)
         answer_callback(cid)
         send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
         return
@@ -684,8 +682,6 @@ def handle_callback(cb: dict):
         answer_callback(cid)
         send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
         return
-
-    # ── filters callbacks (admin בלבד) ───────────────────
 
     if user_id != ADMIN_USER_ID:
         answer_callback(cid, "⛔ רק המנהל יכול לשנות פילטרים.")
