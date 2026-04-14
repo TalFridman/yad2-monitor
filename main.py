@@ -416,6 +416,7 @@ seen_state = {
     "rooms":     set(),
     "min_price": None,
     "max_price": None,
+    "date_offset": None,
 }
 
 MIN_PRICE_OPTIONS = [0, 2000, 3000, 4000, 5000]
@@ -455,7 +456,35 @@ def build_seen_keyboard() -> dict:
     if row:
         rooms_rows.append(row)
 
+    DATE_OPTIONS = [
+        ("היום",        0),
+        ("אתמול",       1),
+        ("לפני 2 ימים", 2),
+        ("לפני 3 ימים", 3),
+        ("לפני 4 ימים", 4),
+        ("לפני 5 ימים", 5),
+        ("לפני 6 ימים", 6),
+        ("לפני 7 ימים", 7),
+    ]
+
+    def tick_date(offset):
+        label = DATE_OPTIONS[offset][0]
+        return f"✅ {label}" if seen_state["date_offset"] == offset else label
+
     keyboard = [
+        [{"text": "── תאריך ──", "callback_data": "seen_noop"}],
+        [
+            {"text": tick_date(0), "callback_data": "seen_date_0"},
+            {"text": tick_date(1), "callback_data": "seen_date_1"},
+            {"text": tick_date(2), "callback_data": "seen_date_2"},
+            {"text": tick_date(3), "callback_data": "seen_date_3"},
+        ],
+        [
+            {"text": tick_date(4), "callback_data": "seen_date_4"},
+            {"text": tick_date(5), "callback_data": "seen_date_5"},
+            {"text": tick_date(6), "callback_data": "seen_date_6"},
+            {"text": tick_date(7), "callback_data": "seen_date_7"},
+        ],
         [{"text": "── אתר ──", "callback_data": "seen_noop"}],
         [
             {"text": tick("יד2",  s["sources"]), "callback_data": "seen_tog_src_יד2"},
@@ -484,6 +513,7 @@ def reset_seen_state():
     seen_state["rooms"]     = set()
     seen_state["min_price"] = None
     seen_state["max_price"] = None
+    seen_state["date_offset"] = None
 
 def send_seen_menu():
     reset_seen_state()
@@ -510,7 +540,17 @@ def run_seen_search():
         filters.append(("price", "lte", s["max_price"]))
 
     # Supabase תומך בפרמטרים מרובים לאותו שדה דרך headers
+    if seen_state["date_offset"] is not None:
+        from datetime import timedelta
+        target = (datetime.now() - timedelta(days=seen_state["date_offset"])).strftime("%Y-%m-%d")
+        params["seen_at"] = f"gte.{target}T00:00:00"
+
     rows = sb_get("listings", params)
+
+    if seen_state["date_offset"] is not None:
+        from datetime import timedelta
+        target = (datetime.now() - timedelta(days=seen_state["date_offset"])).strftime("%Y-%m-%d")
+        rows = [r for r in rows if r.get("seen_at", "").startswith(target)]
 
     # סינון price ו-rooms בצד הלקוח
     if s["min_price"] is not None and s["min_price"] > 0:
@@ -665,6 +705,13 @@ def handle_callback(cb: dict):
     if data.startswith("seen_tog_rooms_"):
         r = data[len("seen_tog_rooms_"):]
         seen_state["rooms"].discard(r) if r in seen_state["rooms"] else seen_state["rooms"].add(r)
+        answer_callback(cid)
+        send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
+        return
+
+    if data.startswith("seen_date_"):
+        offset = int(data.split("_")[-1])
+        seen_state["date_offset"] = None if seen_state["date_offset"] == offset else offset
         answer_callback(cid)
         send_telegram("🔍 עדכן מסננים:", reply_markup=build_seen_keyboard())
         return
