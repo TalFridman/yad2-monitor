@@ -76,6 +76,18 @@ def sb_get(table: str, params: dict = None):
         print(f"[{now_str()}] supabase get error: {e}")
         return []
 
+def sb_get_strict(table: str, params: dict = None):
+    """כמו sb_get אבל זורק exception על שגיאת חיבור במקום להחזיר []."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers={**sb_headers(), "Prefer": ""},
+        params=params,
+        timeout=10
+    )
+    if not r.ok:
+        raise RuntimeError(f"Supabase HTTP {r.status_code}: {r.text[:200]}")
+    return r.json()
+
 def sb_upsert(table: str, data):
     try:
         requests.post(
@@ -134,7 +146,7 @@ def filters_summary(filters: dict) -> str:
 # ══════════════════════════════════════════════════════
 
 def load_seen_ids() -> set:
-    rows = sb_get("listings", {"select": "id"})
+    rows = sb_get_strict("listings", {"select": "id"})
     return set(r["id"] for r in rows)
 
 def save_listing(listing: dict):
@@ -838,8 +850,12 @@ def poll_telegram():
 # ══════════════════════════════════════════════════════
 
 def check_all():
-    filters  = load_filters()
-    seen_ids = load_seen_ids()
+    filters = load_filters()
+    try:
+        seen_ids = load_seen_ids()
+    except Exception as e:
+        print(f"[{now_str()}] ⚠️ דילגנו על סריקה — שגיאת חיבור ל-Supabase: {e}")
+        return
     print(f"\n[{now_str()}] 🔍 בודק | מחיר≤{filters['max_price']} | {filters['min_rooms']:.1f}-{filters['max_rooms']:.1f}חד' | {filters['min_size']}מ\"ר+")
     total_new = 0
     for name, scraper in SCRAPERS:
@@ -863,9 +879,13 @@ def check_all():
     print(f"[{now_str()}] סיום. {'🎉 ' + str(total_new) + ' חדשות!' if total_new else 'אין חדש.'}")
 
 def scan_silent():
-    filters  = load_filters()
-    seen_ids = load_seen_ids()
-    count    = 0
+    filters = load_filters()
+    try:
+        seen_ids = load_seen_ids()
+    except Exception as e:
+        print(f"[{now_str()}] ⚠️ scan_silent בוטל — שגיאת חיבור ל-Supabase: {e}")
+        return 0
+    count = 0
     for name, scraper in SCRAPERS:
         print(f"[{now_str()}] סורק {name} בשקט...")
         try:
@@ -891,8 +911,15 @@ if __name__ == "__main__":
 
     threading.Thread(target=poll_telegram, daemon=True).start()
 
-    existing = load_seen_ids()
-    if not existing:
+    try:
+        existing = load_seen_ids()
+    except Exception as e:
+        print(f"[{now_str()}] ⚠️ לא ניתן לטעון DB בהפעלה — שגיאת חיבור ל-Supabase: {e}")
+        existing = None
+
+    if existing is None:
+        print(f"[{now_str()}] ממתין לסריקה הראשונה עד שה-DB יהיה זמין...")
+    elif not existing:
         print(f"[{now_str()}] 🚀 הפעלה ראשונה — סורק הכל בשקט (ללא התראות)...")
         count = scan_silent()
         print(f"[{now_str()}] ✅ נשמרו {count} מודעות ב-DB. מעכשיו — רק חדשות!\n")
