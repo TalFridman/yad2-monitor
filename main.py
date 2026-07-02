@@ -17,7 +17,7 @@
   /reset            — חזרה לברירת מחדל
 """
 
-import json, os, re, time, threading, requests
+import json, os, re, time, threading, requests, random
 from datetime import datetime
 
 # ══════════════════════════════════════════════════════
@@ -37,8 +37,16 @@ DEFAULT_FILTERS = {
     "min_size":  50,
 }
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+]
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": USER_AGENTS[0],
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
@@ -269,11 +277,12 @@ def answer_callback(callback_id: str, text: str = ""):
 
 def fetch_html(url: str, homepage: str = None):
     try:
+        headers = {**HEADERS, "User-Agent": random.choice(USER_AGENTS)}
         session = requests.Session()
         if homepage:
-            session.get(homepage, headers=HEADERS, timeout=15)
+            session.get(homepage, headers=headers, timeout=15)
             time.sleep(1)
-        resp = session.get(url, headers=HEADERS, timeout=20)
+        resp = session.get(url, headers=headers, timeout=20)
         if resp.status_code == 200:
             return resp.text
         print(f"[{now_str()}] HTTP {resp.status_code} — {url[:70]}")
@@ -341,7 +350,7 @@ def scrape_yad2(filters: dict) -> list:
             listings = parse_yad2(html, area["label"])
             print(f"[{now_str()}] יד2  | {len(listings):2d} — {area['label']}")
             results.extend(listings)
-        time.sleep(2)
+        time.sleep(random.uniform(4, 7))
     return results
 
 # ══════════════════════════════════════════════════════
